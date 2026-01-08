@@ -1,0 +1,14 @@
+/* Improved Targets: Token HUD visibility control
+ * Hidden by default when body has improved-targets-hide-tokenhud
+ * Temporarily shown when also has improved-targets-show-tokenhud
+ */
+
+body.improved-targets-hide-tokenhud #token-hud {
+  display: none !important;
+}
+
+body.improved-targets-hide-tokenhud.improved-targets-show-tokenhud #token-hud {
+  display: block !important;
+  visibility: visible !important;
+  pointer-events: auto !important;
+}

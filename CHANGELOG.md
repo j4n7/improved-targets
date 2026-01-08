@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.2] - 2026-01-08
+
+- GM token context menu suppression (optional UX)
+  - Prevent token HUD opening on right click when module handles targeting.
+  - Show/close token HUD on MMB click.
+
 ## [0.0.1] - 2026-01-08
 
 ### Added

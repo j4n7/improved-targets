@@ -22,11 +22,6 @@ Priority levels:
   - Standardize log prefix and reduce noise.
 
 ## P2
-- GM token context menu suppression (optional UX)
-  - Prevent token HUD opening on right click when module handles targeting.
-  - Show token HUD only on Shift + right click (or other modifier).
-  - Constraint: initially support/test only for GM using the Foundry desktop application (Electron). Browser behavior (Firefox/macOS) may differ.
-
 - Hover UX enhancements
   - Optional "incoming targets" mode on modifier key.
   - Limit or aggregate incoming lines if noisy.
@@ -45,3 +40,6 @@ Priority levels:
 - Persistence policy options
   - Optional keep targets across combats vs clear on combat end.
   - Optional auto-clear on turn change.
+
+- GM token context menu suppression (optional UX)
+  - Make MMB work on token when HUD is open.

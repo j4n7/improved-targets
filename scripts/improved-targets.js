@@ -6,13 +6,17 @@
 const MODULE_ID = "improved-targets";
 const FLAG_SCOPE = MODULE_ID;
 const FLAG_KEY = "targetsByUser";
-const DEBUG = false;
+const DEBUG = true;
 
 const CONFIG = {
   // If false, players only see the active token connections (same as GM).
   // If true, players also see persistent connections for their other owned combat tokens.
   showPlayerOwnedPersistent: false,
-  syncCoreTargets: true
+  syncCoreTargets: true,
+
+  // Token HUD control (GM only, combat only, Electron only)
+  tokenHudHideInCombatForGm: true,
+  tokenHudShowWithMmb: true
 };
 
 const TEST = {
@@ -63,10 +67,19 @@ class ImprovedTargets {
     });
 
     Hooks.on("updateCombat", (combat, changed) => {
+      if (changed?.started === true) {
+        this._setTokenHudHidden(this._tokenHudGateApplies());
+        this._scheduleRedraw();
+        return;
+      }
+
       if (changed?.started === false) {
+        this._rehideTokenHud();
+        this._setTokenHudHidden(false);
         this._onCombatEnded();
         return;
       }
+
       this._scheduleRedraw();
     });
 
@@ -170,7 +183,6 @@ class ImprovedTargets {
     }
   }
 
-
   static _installSocketListener() {
     if (this._socketInstalled) return;
     this._socketInstalled = true;
@@ -234,6 +246,159 @@ class ImprovedTargets {
     const channel = `module.${MODULE_ID}`;
     game.socket.emit(channel, { type: "redraw" });
   }
+
+  /* =========================
+   * Token HUD control
+   * ========================= */
+
+  static _tokenHudHideClass = "improved-targets-hide-tokenhud";
+  static _tokenHudShowClass = "improved-targets-show-tokenhud";
+
+  static _tokenHudGateApplies() {
+    if (!CONFIG.tokenHudHideInCombatForGm) return false;
+    if (!game.user?.isGM) return false;
+    if (!game.combat?.started) return false;
+    return true;
+  }
+
+  static _setTokenHudHidden(hidden) {
+    if (!document?.body) return;
+    document.body.classList.toggle(this._tokenHudHideClass, Boolean(hidden));
+    if (!hidden) document.body.classList.remove(this._tokenHudShowClass);
+  }
+
+  static _showTokenHudTemporarily() {
+    if (!document?.body) return;
+    if (!document.body.classList.contains(this._tokenHudHideClass)) return;
+    document.body.classList.add(this._tokenHudShowClass);
+  }
+
+  static _rehideTokenHud() {
+    if (!document?.body) return;
+    document.body.classList.remove(this._tokenHudShowClass);
+  }
+
+  static _getCanvasPositionFromDomEvent(e) {
+    const renderer = canvas?.app?.renderer;
+    const stage = canvas?.stage;
+    if (!renderer || !stage) return null;
+
+    const events = renderer.events;
+    if (!events?.mapPositionToPoint) return null;
+
+    // Convert DOM client coords to Pixi screen coords correctly (handles DOM scaling)
+    const screen = new PIXI.Point();
+    events.mapPositionToPoint(screen, e.clientX, e.clientY);
+
+    // Convert screen coords to world (stage) coords
+    const world = stage.toLocal(screen);
+    return { x: world.x, y: world.y };
+  }
+
+  static _installTokenHudMmbHandlers() {
+    if (this._tokenHudMmbHandlersInstalled) return;
+    this._tokenHudMmbHandlersInstalled = true;
+
+    const view = canvas?.app?.view;
+    if (!view) return;
+
+    // Debounce for double-fire (pointerdown + auxclick)
+    this._lastHudMmbAt = this._lastHudMmbAt ?? 0;
+
+    const isClickInsideHud = (e) => {
+      const el = e?.target;
+      if (!(el instanceof Element)) return false;
+      return Boolean(el.closest?.("#token-hud"));
+    };
+
+    const isMiddleClick = (e) => {
+      const button = e?.button;
+      const buttons = e?.buttons ?? 0;
+      return button === 1 || (buttons & 4) === 4;
+    };
+
+    const gateApplies = () => {
+      if (!CONFIG.tokenHudHideInCombatForGm) return false;
+      if (!game.user?.isGM) return false;
+      if (!game.combat?.started) return false;
+      return true;
+    };
+
+    const hud = () => canvas?.hud?.token;
+
+    const getTokenUnderPointer = (e) => {
+      const pos = this._getCanvasPositionFromDomEvent(e);
+      if (!pos) return null;
+      return this._getTokenAtPosition(pos.x, pos.y);
+    };
+
+    const handleMmb = (e, source) => {
+      if (!gateApplies()) return false;
+      if (!CONFIG.tokenHudShowWithMmb) return false;
+      if (!isMiddleClick(e)) return false;
+      if (isClickInsideHud(e)) return false;
+
+      // Debounce: ignore the second event if it fires immediately after the first
+      const now = Date.now();
+      if (now - this._lastHudMmbAt < 150) return true;
+      this._lastHudMmbAt = now;
+
+      // Prevent browser autoscroll
+      try { e.preventDefault(); } catch (_) {}
+
+      const h = hud();
+      const boundId = h?.object?.id ?? null;
+      const token = getTokenUnderPointer(e);
+
+      // If no token under pointer: toggle off (hide)
+      if (!token) {
+        this._rehideTokenHud();
+        try { h?.clear(); } catch (_) {}
+        return true;
+      }
+
+      // If same token: toggle off
+      if (token.id === boundId) {
+        this._rehideTokenHud();
+        try { h?.clear(); } catch (_) {}
+        return true;
+      }
+
+      // Otherwise: switch to new token (also covers "open first time")
+      this._showTokenHudTemporarily();
+      try { h?.bind(token); } catch (err) {
+        console.error(`${MODULE_ID} | failed to bind TokenHUD`, err);
+      }
+
+      return true;
+    };
+
+    const onPointerDownCapture = (e) => {
+      // Keep HUD interactive
+      if (isClickInsideHud(e)) return;
+
+      // If HUD is currently allowed, any click outside hides it (do not block)
+      if (document?.body?.classList?.contains(this._tokenHudShowClass)) {
+        this._rehideTokenHud();
+      }
+
+      // MMB special handling (may not fire here on some setups, but harmless)
+      handleMmb(e, "pointerdown");
+    };
+
+    const onAuxClickCapture = (e) => {
+      // MMB often arrives here
+      handleMmb(e, "auxclick");
+    };
+
+    const domOptions = { capture: true, passive: false };
+    view.addEventListener("pointerdown", onPointerDownCapture, domOptions);
+    view.addEventListener("auxclick", onAuxClickCapture, domOptions);
+
+    this._onViewPointerDownForHud = onPointerDownCapture;
+    this._onViewAuxClickForHud = onAuxClickCapture;
+  }
+
 
   /* =========================
    * Gating and authority
@@ -451,6 +616,12 @@ class ImprovedTargets {
       this._onStageRightDownBound = this._onStageRightDown.bind(this);
       canvas.stage.on("rightdown", this._onStageRightDownBound);
 
+      // Token HUD: install MMB reveal + click-to-hide handlers
+      this._installTokenHudMmbHandlers();
+
+      // Apply hide state if combat is already started
+      this._setTokenHudHidden(this._tokenHudGateApplies());
+
       debugLog("canvasReady: handlers installed");
     });
   }
@@ -482,18 +653,15 @@ class ImprovedTargets {
 
   static _getTokenAtPosition(x, y) {
     const tokens = canvas.tokens?.placeables ?? [];
-    if (!tokens.length) return null;
-
-    // Iterate from top to bottom (last drawn is usually "on top")
     for (let i = tokens.length - 1; i >= 0; i -= 1) {
       const t = tokens[i];
-      if (!t) continue;
+      const left = t.x ?? t.document?.x ?? 0;
+      const top = t.y ?? t.document?.y ?? 0;
+      const width = t.w ?? 0;
+      const height = t.h ?? 0;
 
-      const b = t.getBounds();
-      const inside = x >= b.x && x <= b.x + b.width && y >= b.y && y <= b.y + b.height;
-      if (inside) return t;
+      if (x >= left && x <= left + width && y >= top && y <= top + height) return t;
     }
-
     return null;
   }
 
