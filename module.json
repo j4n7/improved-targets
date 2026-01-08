@@ -1,0 +1,18 @@
+{
+  "id": "improved-targets",
+  "title": "Improved Targets",
+  "description": "Combat-only targeting overlay with per-user target lines and grid-aligned outlines.",
+  "version": "0.0.1",
+  "authors": [
+    {
+      "name": "Local"
+    }
+  ],
+  "compatibility": {
+    "minimum": "13",
+    "verified": "13"
+  },
+  "esmodules": [
+    "scripts/improved-targets.js"
+  ]
+}
