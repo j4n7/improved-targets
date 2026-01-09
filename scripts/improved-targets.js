@@ -63,7 +63,13 @@ class ImprovedTargets {
       this._onCanvasReady();
 
       // GM cleans invalid references after scene is ready
-      if (game.combat?.started) this._sanitizeCombatTargets(game.combat);
+      const combat = this._getCombatForCurrentScene();
+      if (combat?.started) this._sanitizeCombatTargets(combat);
+    });
+
+    Hooks.on("canvasTearDown", () => {
+      debugLog("hook: canvasTearDown");
+      this._destroyOverlayLayers();
     });
 
     Hooks.on("updateCombat", (combat, changed) => {
@@ -76,26 +82,29 @@ class ImprovedTargets {
       if (changed?.started === false) {
         this._rehideTokenHud();
         this._setTokenHudHidden(false);
-        this._onCombatEnded();
+        this._onCombatEnded(combat);
         return;
       }
 
       this._scheduleRedraw();
     });
 
-    Hooks.on("deleteCombat", () => {
-      this._onCombatEnded();
+    Hooks.on("deleteCombat", (combat) => {
+      this._onCombatEnded(combat);
     });
 
     Hooks.on("combatTurnChange", (combat) => {
-      if (combat?.started) this._sanitizeCombatTargets(combat);
+      // Only sanitize for the combat shown on the current scene
+      if (!combat?.started) return;
+      if (combat?.scene?.id && canvas?.scene?.id && combat.scene.id !== canvas.scene.id) return;
+      this._sanitizeCombatTargets(combat);
     });
 
     Hooks.on("updateCombatant", () => this._scheduleRedraw());
     Hooks.on("deleteCombatant", () => this._scheduleRedraw());
     Hooks.on("updateToken", (tokenDoc, changed) => {
       const moved = Object.prototype.hasOwnProperty.call(changed, "x") || Object.prototype.hasOwnProperty.call(changed, "y");
-      if (moved && game.combat?.started) {
+      if (moved && this._isCombatStarted()) {
         this._scheduleRedrawNextFrame?.() ?? this._scheduleRedraw();
         return;
       }
@@ -106,7 +115,8 @@ class ImprovedTargets {
       TEST.deleteTokenCalls += 1;
       debugLog("TEST deleteTokenCalls", TEST.deleteTokenCalls);
 
-      if (game.combat?.started) this._sanitizeCombatTargets(game.combat);
+      const combat = this._getCombatForCurrentScene();
+      if (combat?.started) this._sanitizeCombatTargets(combat);
       this._scheduleRedraw();
     });
 
@@ -116,9 +126,104 @@ class ImprovedTargets {
     });
 
     Hooks.on("refreshToken", (token) => {
-      if (!game.combat?.started) return;
+      if (!this._isCombatStarted()) return;
       ImprovedTargets._scheduleRedraw();
     });
+  }
+
+
+  static _isIsometricMode({ debug = false } = {}) {
+    const moduleActive = Boolean(game.modules.get("isometric-perspective")?.active);
+    if (!moduleActive) return false;
+
+    const flag = canvas?.scene?.flags?.["isometric-perspective"] ?? null;
+
+    // This is the key in your environment (module v0.9.3)
+    if (flag && typeof flag.isometricEnabled === "boolean") {
+      const result = flag.isometricEnabled === true;
+      if (debug) console.log("[improved-targets] iso via scene flag:", result, flag);
+      return result;
+    }
+
+    // Fallback: look at canvas.stage, not canvas.primary
+    const s = canvas?.stage;
+    const rot = s?.rotation ?? 0;
+    const skewX = s?.skew?.x ?? 0;
+    const skewY = s?.skew?.y ?? 0;
+
+    const eps = 1e-6;
+    const result = Math.abs(rot) > eps || Math.abs(skewX) > eps || Math.abs(skewY) > eps;
+
+    if (debug) {
+      console.log("[improved-targets] iso via stage transform:", result, { rot, skewX, skewY, flag });
+    }
+
+    return result;
+  }
+
+  static _isoDebugLog(payload) {
+    const { debug, result, enabled } = payload;
+    if (!debug) return;
+
+    const sceneId = canvas?.scene?.id ?? null;
+
+    const changed =
+      this._isoDebug.lastSceneId !== sceneId ||
+      this._isoDebug.lastResult !== result ||
+      this._isoDebug.lastEnabled !== enabled;
+
+    if (!changed) return;
+
+    this._isoDebug.lastSceneId = sceneId;
+    this._isoDebug.lastResult = result;
+    this._isoDebug.lastEnabled = enabled;
+
+    const sceneName = canvas?.scene?.name ?? "(unknown scene)";
+
+    console.groupCollapsed(`[improved-targets] isometric detect: ${sceneName} -> ${result}`);
+    console.log("moduleActive:", payload.moduleActive);
+    console.log("sceneFlagEnabled:", enabled);
+    console.log("isoFlags object:", payload.isoFlags);
+    console.log("primary transform:", { rotation: payload.rot, skewX: payload.skewX, skewY: payload.skewY });
+    console.log("transformSuggestsIso:", payload.transformSuggestsIso);
+    console.groupEnd();
+  }
+
+  static _getTokenDisplayObject(token) {
+    // Prefer the Token container itself
+    if (token?.toLocal && token?.toGlobal) return token;
+    if (token?.object?.toLocal && token?.object?.toGlobal) return token.object;
+    if (token?.mesh?.toLocal && token?.mesh?.toGlobal) return token.mesh;
+    return null;
+  }
+
+  static _tokenLocalToContainer(token, container, localPoint) {
+    if (!container || !localPoint) return localPoint;
+
+    if (!container.parent) {
+      this._ensureOverlayLayers?.();
+      if (!container.parent) return localPoint;
+    }
+
+    const from = this._getTokenDisplayObject(token);
+    if (!from || !container.toLocal) return localPoint;
+
+    try {
+      // Convert from token-local directly into overlay-local
+      return container.toLocal(localPoint, from);
+    } catch (err) {
+      console.warn("[improved-targets] tokenLocalToContainer failed", err);
+      return localPoint;
+    }
+  }
+
+
+  static _getTokenAnchorLocal(token, anchor = "center") {
+    const w = token?.w ?? 0;
+    const h = token?.h ?? 0;
+
+    if (anchor === "feet") return new PIXI.Point(w * 0.5, h);
+    return new PIXI.Point(w * 0.5, h * 0.5);
   }
 
   static _onReady() {
@@ -131,9 +236,17 @@ class ImprovedTargets {
     this._scheduleRedraw();
   }
 
-  static _onCombatEnded() {
+  static _onCombatEnded(combat = null) {
     TEST.combatEndedCalls += 1;
     debugLog("TEST combatEndedCalls", TEST.combatEndedCalls);
+
+    // If a combat from another scene ends while viewing this scene, do not clear local state.
+    const currentSceneId = canvas?.scene?.id ?? null;
+    const endedSceneId = combat?.scene?.id ?? null;
+    if (endedSceneId && currentSceneId && endedSceneId !== currentSceneId) {
+      this._scheduleRedraw();
+      return;
+    }
 
     // Stop drawing immediately for everyone
     this._clearOverlayNow();
@@ -148,6 +261,9 @@ class ImprovedTargets {
     if (!combat?.started) return;
     if (!game.user.isGM) return;
     if (!canvas?.tokens) return;
+
+    // Only sanitize for combats that belong to the currently viewed scene.
+    if (combat?.scene?.id && canvas?.scene?.id && combat.scene.id !== canvas.scene.id) return;
 
     try {
       for (const combatant of combat.combatants) {
@@ -218,7 +334,7 @@ class ImprovedTargets {
   static async _applyTargetsUpdateRequest(data) {
     if (!this._isCombatStarted()) return;
 
-    const combat = game.combat;
+    const combat = this._getCombatForCurrentScene();
     if (!combat) return;
 
     const activeCombatant = combat.combatant;
@@ -257,7 +373,7 @@ class ImprovedTargets {
   static _tokenHudGateApplies() {
     if (!CONFIG.tokenHudHideInCombatForGm) return false;
     if (!game.user?.isGM) return false;
-    if (!game.combat?.started) return false;
+    if (!this._isCombatStarted()) return false;
     return true;
   }
 
@@ -320,7 +436,7 @@ class ImprovedTargets {
     const gateApplies = () => {
       if (!CONFIG.tokenHudHideInCombatForGm) return false;
       if (!game.user?.isGM) return false;
-      if (!game.combat?.started) return false;
+      if (!this._isCombatStarted()) return false;
       return true;
     };
 
@@ -404,13 +520,45 @@ class ImprovedTargets {
    * Gating and authority
    * ========================= */
 
+  static _getCombatForCurrentScene() {
+    const sceneId = canvas?.scene?.id ?? null;
+    const active = game.combat ?? null;
+
+    // No scene available yet, fall back to active combat.
+    if (!sceneId) return active;
+
+    // 1) If the globally active combat is explicitly linked to this scene, use it.
+    if (active?.scene?.id === sceneId) return active;
+
+    // 2) If the active combat is unlinked (no scene) but its active token is on this canvas, treat it as current.
+    if (active && !active?.scene?.id) {
+      const tokenId = active?.combatant?.tokenId ?? null;
+      if (tokenId && canvas?.tokens?.get(tokenId)) return active;
+    }
+
+    // 3) Otherwise, find a combat encounter linked to this scene.
+    const combats = Array.isArray(game.combats?.contents) ? game.combats.contents : [];
+
+    const startedLinked =
+      combats.find((c) => c?.started === true && c?.scene?.id === sceneId) ?? null;
+    if (startedLinked) return startedLinked;
+
+    const anyLinked = combats.find((c) => c?.scene?.id === sceneId) ?? null;
+    if (anyLinked) return anyLinked;
+
+    // 4) No combat clearly applies to this scene.
+    return null;
+  }
+
   static _isCombatStarted() {
-    return !!game.combat && !!game.combat.started;
+    const combat = this._getCombatForCurrentScene();
+    return !!combat && combat.started === true;
   }
 
   static _getActiveCombatant() {
     if (!this._isCombatStarted()) return null;
-    return game.combat.combatant ?? null;
+    const combat = this._getCombatForCurrentScene();
+    return combat?.combatant ?? null;
   }
 
   static _getActiveToken() {
@@ -775,24 +923,43 @@ class ImprovedTargets {
    * Rendering
    * ========================= */
 
-  static _ensureOverlayLayers() {
+  
+  static _destroyOverlayLayers() {
+    try {
+      if (this.containers?.persistent) {
+        if (!this.containers.persistent.destroyed) this.containers.persistent.destroy({ children: true });
+        this.containers.persistent = null;
+      }
+      if (this.containers?.hover) {
+        if (!this.containers.hover.destroyed) this.containers.hover.destroy({ children: true });
+        this.containers.hover = null;
+      }
+    } catch (err) {
+      console.warn("[improved-targets] destroy overlay layers failed", err);
+    }
+  }
+
+static _ensureOverlayLayers() {
     if (!canvas?.stage) return;
 
     const parent = canvas.primary ?? canvas.stage;
 
+    if (this.containers.persistent && this.containers.persistent.destroyed) this.containers.persistent = null;
+    if (this.containers.hover && this.containers.hover.destroyed) this.containers.hover = null;
+
     if (!this.containers.persistent) {
       this.containers.persistent = new PIXI.Container();
       this.containers.persistent.name = "improved-targets-persistent";
-      parent.addChild(this.containers.persistent);
-    } else if (this.containers.persistent.parent !== parent) {
+    }
+    if (this.containers.persistent.parent !== parent) {
       parent.addChild(this.containers.persistent);
     }
 
     if (!this.containers.hover) {
       this.containers.hover = new PIXI.Container();
       this.containers.hover.name = "improved-targets-hover";
-      parent.addChild(this.containers.hover);
-    } else if (this.containers.hover.parent !== parent) {
+    }
+    if (this.containers.hover.parent !== parent) {
       parent.addChild(this.containers.hover);
     }
   }
@@ -834,7 +1001,8 @@ class ImprovedTargets {
 
     if (!this._isCombatStarted()) return;
 
-    const combat = game.combat;
+    const combat = this._getCombatForCurrentScene();
+    if (!combat || combat.started !== true) return;
     const viewer = game.user;
 
     const activeCombatant = combat.combatant ?? null;
@@ -962,57 +1130,84 @@ class ImprovedTargets {
     container.addChild(g);
 
     const alpha = isHover ? 0.6 : 0.9;
-
     g.lineStyle(thickness, color, alpha);
 
-    const a = originToken.center;
-    const b = targetToken.center;
+    // ADD THIS BLOCK (non-isometric branch)
+    if (!this._isIsometricMode()) {
+      const a = originToken.center;
+      const b = targetToken.center;
+      g.moveTo(a.x, a.y);
+      g.lineTo(b.x, b.y);
+      return;
+    }
+
+    // Existing isometric branch (keep what you already have working)
+    const anchor = "center";
+    const aLocal = this._getTokenAnchorLocal(originToken, anchor);
+    const bLocal = this._getTokenAnchorLocal(targetToken, anchor);
+
+    const a = this._tokenLocalToContainer(originToken, container, aLocal);
+    const b = this._tokenLocalToContainer(targetToken, container, bLocal);
 
     g.moveTo(a.x, a.y);
     g.lineTo(b.x, b.y);
   }
 
-  static _drawOutline(container, token, color, thickness, { isAutoTarget = false, isHover = false }) {
+  static _drawOutline(container, token, color, thickness, { isHover = false }) {
     const g = new PIXI.Graphics();
     container.addChild(g);
 
     const outlineAlpha = isHover ? 0.6 : 0.9;
-    const fillAlpha = isHover ? 0.5 : 0.8;
+    const fillAlpha = isHover ? 0.12 : 0.18; // Keep your original values if different
     const outlineThickness = Math.max(1, Math.floor(thickness));
 
-    const x = token.document.x;
-    const y = token.document.y;
+    const gridType = canvas.grid?.type;
     const w = token.w;
     const h = token.h;
 
-    const gridType = canvas.grid?.type;
+    // Non-isometric: world vertices -> overlay local
+    if (!this._isIsometricMode()) {
+      const x = token.document.x;
+      const y = token.document.y;
 
-    // Fill first
-    g.beginFill(color, fillAlpha);
+      g.beginFill(color, fillAlpha);
+      if (this._isHexGrid(gridType)) g.drawPolygon(this._getHexPoints({ x, y, w, h, gridType }));
+      else g.drawRect(x, y, w, h);
+      g.endFill();
 
-    if (this._isHexGrid(gridType)) {
-      const points = this._getHexPoints({ x, y, w, h, gridType });
-      g.drawPolygon(points);
-    } else {
-      g.drawRect(x, y, w, h);
+      g.lineStyle(outlineThickness, color, outlineAlpha);
+      if (this._isHexGrid(gridType)) g.drawPolygon(this._getHexPoints({ x, y, w, h, gridType }));
+      else g.drawRect(x, y, w, h);
+      return;
     }
 
+    // Isometric: token-local vertices -> overlay local
+    let localPoints = [];
+
+    if (this._isHexGrid(gridType)) {
+      const pairs = this._getHexPoints({ x: 0, y: 0, w, h, gridType });
+      for (let i = 0; i < pairs.length; i += 2) localPoints.push(new PIXI.Point(pairs[i], pairs[i + 1]));
+    } else {
+      localPoints = [
+        new PIXI.Point(0, 0),
+        new PIXI.Point(w, 0),
+        new PIXI.Point(w, h),
+        new PIXI.Point(0, h)
+      ];
+    }
+
+    const projected = localPoints.map((p) => this._tokenLocalToContainer(token, container, p));
+    const flat = [];
+    for (const p of projected) flat.push(p.x, p.y);
+
+    g.beginFill(color, fillAlpha);
+    g.drawPolygon(flat);
     g.endFill();
 
-    // Then outline
     g.lineStyle(outlineThickness, color, outlineAlpha);
-
-    if (this._isHexGrid(gridType)) {
-      const points = this._getHexPoints({ x, y, w, h, gridType });
-      g.drawPolygon(points);
-    } else {
-      g.drawRect(x, y, w, h);
-    }
-
-    if (isAutoTarget) {
-      // Still only outline+fill, no line is drawn elsewhere for auto-target.
-    }
+    g.drawPolygon(flat);
   }
+
 
   static _getUserColor(userId) {
     const u = game.users?.get(userId);

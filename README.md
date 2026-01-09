@@ -30,12 +30,6 @@ Priority levels:
   - Fine tune alpha/thickness per state (active vs hover).
   - Optional line style (dashed) for hover.
 
-## P2 / P3
-- Isometric Perspective compatibility
-  - Detect `isometric-perspective` active.
-  - Adjust drawing coordinate space so lines and shapes render correctly in isometric mode.
-  - Validate on at least one rotated/skewed scene configuration.
-
 ## P3
 - Persistence policy options
   - Optional keep targets across combats vs clear on combat end.
@@ -48,6 +42,11 @@ Priority levels:
 # Changelog
 
 All notable changes to this project will be documented in this file.
+
+## [0.0.2] - 2026-01-09
+
+- Isometric Perspective compatibility
+  - Adjust drawing coordinate space so lines and shapes render correctly in isometric mode.
 
 ## [0.0.2] - 2026-01-08
 
